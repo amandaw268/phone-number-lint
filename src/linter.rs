@@ -122,3 +122,86 @@ fn check_separator_consistency(
         });
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn rules(line: &str) -> Vec<&'static str> {
+        scan_line(1, line).iter().map(|f| f.rule).collect()
+    }
+
+    #[test]
+    fn clean_us_number_with_dashes_is_not_flagged() {
+        assert_eq!(rules("call 555-123-4567 now"), Vec::<&str>::new());
+    }
+
+    #[test]
+    fn clean_ten_digit_number_no_separators_is_not_flagged() {
+        assert_eq!(rules("5551234567"), Vec::<&str>::new());
+    }
+
+    #[test]
+    fn clean_international_number_is_not_flagged() {
+        assert_eq!(rules("+44 20 7946 0958"), Vec::<&str>::new());
+    }
+
+    #[test]
+    fn mixed_dash_and_dot_is_flagged() {
+        assert_eq!(rules("555-123.4567"), vec!["phone-mixed-separators"]);
+    }
+
+    #[test]
+    fn mixed_space_and_dash_is_flagged() {
+        assert_eq!(rules("(555) 123-4567"), vec!["phone-mixed-separators"]);
+    }
+
+    #[test]
+    fn nine_digit_run_is_flagged_for_digit_count() {
+        assert_eq!(rules("1234-567-89"), vec!["phone-digit-count"]);
+    }
+
+    #[test]
+    fn run_below_minimum_digits_is_ignored() {
+        assert_eq!(rules("call 12-3456 today"), Vec::<&str>::new());
+    }
+
+    #[test]
+    fn run_above_maximum_digits_is_ignored() {
+        assert_eq!(rules("1234567890123456"), Vec::<&str>::new());
+    }
+
+    #[test]
+    fn plus_prefixed_number_needs_at_least_eight_digits() {
+        assert_eq!(rules("+1 555 123"), vec!["phone-digit-count"]);
+    }
+
+    #[test]
+    fn column_accounts_for_leading_prose_and_is_one_based() {
+        let findings = scan_line(1, "phone: 1234-567-89.");
+        assert_eq!(findings.len(), 1);
+        assert_eq!(findings[0].column, 8);
+        assert_eq!(findings[0].line, 1);
+    }
+
+    #[test]
+    fn multiple_candidates_on_one_line_are_each_evaluated() {
+        assert_eq!(
+            rules("555-123-4567 and 1234-567-89 and 555.123.4567"),
+            vec!["phone-digit-count"]
+        );
+    }
+
+    #[test]
+    fn decimal_number_is_misflagged_as_documented() {
+        // Eight digits after the point, no letters or separators to
+        // distinguish it from a phone number - this is the known
+        // false-positive case tracked in the README limitations.
+        assert_eq!(rules("pi is 3.1415926"), vec!["phone-digit-count"]);
+    }
+
+    #[test]
+    fn empty_line_has_no_findings() {
+        assert_eq!(rules(""), Vec::<&str>::new());
+    }
+}
