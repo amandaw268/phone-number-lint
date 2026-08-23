@@ -41,8 +41,12 @@ on a read error (e.g. the file doesn't exist).
 There's no library of real number plans here, just a heuristic: scan for
 runs of digits and phone-shaped punctuation (`+ - . ( ) `), trim the prose
 punctuation off the edges, and if what's left has between 7 and 15 digits,
-treat it as a candidate and run the rules on it. This means dates, decimal
-numbers, and long IDs can occasionally get flagged - see Limitations below.
+treat it as a candidate and run the rules on it. Two shapes are recognized
+and excluded before the rules run: a plain decimal number (`3.1415926`, one
+dot, digits on both sides) and a dash-grouped date (`2024-01-01` or
+`01-01-2024`, a 4-digit year plus a valid month and day). Everything else
+that falls in the digit-count range gets treated as a candidate - long IDs
+can still occasionally get flagged, see Limitations below.
 
 ## Why streaming matters here
 
@@ -53,9 +57,10 @@ the same memory as scanning a ten-line one.
 
 ## Limitations
 
-- No real number-plan knowledge, so a decimal like `3.14159265` (9 digits)
-  or a date like `2024-01-01` can be misflagged. Reducing this is on the
-  roadmap.
+- No real number-plan knowledge. Plain decimals and dash-grouped dates are
+  filtered out (see above), but other digit runs that happen to fall in
+  phone-number range - order numbers, tracking IDs, slash-separated dates -
+  can still be misflagged.
 - Rules aren't configurable yet - you get exactly these two, always on.
 - One file or stdin per run; no directory scanning yet.
 
