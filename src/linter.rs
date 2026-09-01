@@ -3,6 +3,8 @@
 // number, we scan for runs of digits and phone-shaped punctuation and only
 // judge the parts that look like a number in the first place.
 
+use std::collections::HashMap;
+
 const SEPARATOR_CHARS: [char; 6] = ['+', '-', '.', ' ', '(', ')'];
 
 // Below this many digits a run is more likely a page number or a list index
@@ -10,11 +12,78 @@ const SEPARATOR_CHARS: [char; 6] = ['+', '-', '.', ' ', '(', ')'];
 const MIN_PHONE_DIGITS: usize = 7;
 const MAX_PHONE_DIGITS: usize = 15;
 
+// The names rules are known by, for --disable and --severity. Kept in one
+// place so an unknown rule name given on the command line can be rejected
+// instead of silently doing nothing.
+pub const RULE_NAMES: [&str; 2] = ["phone-mixed-separators", "phone-digit-count"];
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Severity {
+    Warning,
+    Error,
+}
+
+impl Severity {
+    pub fn parse(s: &str) -> Option<Severity> {
+        match s {
+            "warning" => Some(Severity::Warning),
+            "error" => Some(Severity::Error),
+            _ => None,
+        }
+    }
+}
+
+impl std::fmt::Display for Severity {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Severity::Warning => write!(f, "warning"),
+            Severity::Error => write!(f, "error"),
+        }
+    }
+}
+
+// Which rules run and at what severity. Every rule is on and at "error" by
+// default; --disable and --severity on the command line adjust this before
+// scanning starts.
+#[derive(Debug, Clone)]
+pub struct RuleConfig {
+    disabled: HashMap<&'static str, ()>,
+    severity: HashMap<&'static str, Severity>,
+}
+
+impl Default for RuleConfig {
+    fn default() -> Self {
+        RuleConfig {
+            disabled: HashMap::new(),
+            severity: HashMap::new(),
+        }
+    }
+}
+
+impl RuleConfig {
+    pub fn disable(&mut self, rule: &'static str) {
+        self.disabled.insert(rule, ());
+    }
+
+    pub fn set_severity(&mut self, rule: &'static str, severity: Severity) {
+        self.severity.insert(rule, severity);
+    }
+
+    fn is_enabled(&self, rule: &str) -> bool {
+        !self.disabled.contains_key(rule)
+    }
+
+    fn severity_of(&self, rule: &str) -> Severity {
+        self.severity.get(rule).copied().unwrap_or(Severity::Error)
+    }
+}
+
 #[derive(Debug, PartialEq, Eq)]
 pub struct Finding {
     pub line: usize,
     pub column: usize,
     pub rule: &'static str,
+    pub severity: Severity,
     pub message: String,
 }
 
@@ -29,7 +98,7 @@ fn is_prose_punct(c: char) -> bool {
     c == ' ' || c == '.' || c == '-'
 }
 
-pub fn scan_line(line_number: usize, text: &str) -> Vec<Finding> {
+pub fn scan_line(line_number: usize, text: &str, config: &RuleConfig) -> Vec<Finding> {
     let mut findings = Vec::new();
     let mut run_start: Option<usize> = None;
 
@@ -39,17 +108,24 @@ pub fn scan_line(line_number: usize, text: &str) -> Vec<Finding> {
                 run_start = Some(idx);
             }
         } else if let Some(start) = run_start.take() {
-            evaluate_run(line_number, text, start, idx, &mut findings);
+            evaluate_run(line_number, text, start, idx, config, &mut findings);
         }
     }
     if let Some(start) = run_start {
-        evaluate_run(line_number, text, start, text.len(), &mut findings);
+        evaluate_run(line_number, text, start, text.len(), config, &mut findings);
     }
 
     findings
 }
 
-fn evaluate_run(line_number: usize, text: &str, start: usize, end: usize, findings: &mut Vec<Finding>) {
+fn evaluate_run(
+    line_number: usize,
+    text: &str,
+    start: usize,
+    end: usize,
+    config: &RuleConfig,
+    findings: &mut Vec<Finding>,
+) {
     let raw = &text[start..end];
     let trimmed = raw.trim_matches(is_prose_punct);
     if trimmed.is_empty() {
@@ -70,8 +146,8 @@ fn evaluate_run(line_number: usize, text: &str, start: usize, end: usize, findin
         return;
     }
 
-    check_digit_count(line_number, column, trimmed, digit_count, findings);
-    check_separator_consistency(line_number, column, trimmed, findings);
+    check_digit_count(line_number, column, trimmed, digit_count, config, findings);
+    check_separator_consistency(line_number, column, trimmed, config, findings);
 }
 
 // A plain decimal number - one dot, digits on both sides, nothing else in
@@ -133,8 +209,14 @@ fn check_digit_count(
     column: usize,
     trimmed: &str,
     digit_count: usize,
+    config: &RuleConfig,
     findings: &mut Vec<Finding>,
 ) {
+    const RULE: &str = "phone-digit-count";
+    if !config.is_enabled(RULE) {
+        return;
+    }
+
     let has_country_prefix = trimmed.starts_with('+');
     let is_plausible = if has_country_prefix {
         (8..=MAX_PHONE_DIGITS).contains(&digit_count)
@@ -146,7 +228,8 @@ fn check_digit_count(
         findings.push(Finding {
             line: line_number,
             column,
-            rule: "phone-digit-count",
+            rule: RULE,
+            severity: config.severity_of(RULE),
             message: format!(
                 "'{}' has {} digits, which is not a common phone number length",
                 trimmed, digit_count
@@ -159,8 +242,14 @@ fn check_separator_consistency(
     line_number: usize,
     column: usize,
     trimmed: &str,
+    config: &RuleConfig,
     findings: &mut Vec<Finding>,
 ) {
+    const RULE: &str = "phone-mixed-separators";
+    if !config.is_enabled(RULE) {
+        return;
+    }
+
     let mut seps_seen = Vec::new();
     for c in trimmed.chars() {
         if (c == '-' || c == '.' || c == ' ') && !seps_seen.contains(&c) {
@@ -172,7 +261,8 @@ fn check_separator_consistency(
         findings.push(Finding {
             line: line_number,
             column,
-            rule: "phone-mixed-separators",
+            rule: RULE,
+            severity: config.severity_of(RULE),
             message: format!(
                 "'{}' mixes separator styles {:?} within one number",
                 trimmed, seps_seen
@@ -186,7 +276,10 @@ mod tests {
     use super::*;
 
     fn rules(line: &str) -> Vec<&'static str> {
-        scan_line(1, line).iter().map(|f| f.rule).collect()
+        scan_line(1, line, &RuleConfig::default())
+            .iter()
+            .map(|f| f.rule)
+            .collect()
     }
 
     #[test]
@@ -236,7 +329,7 @@ mod tests {
 
     #[test]
     fn column_accounts_for_leading_prose_and_is_one_based() {
-        let findings = scan_line(1, "phone: 1234-567-89.");
+        let findings = scan_line(1, "phone: 1234-567-89.", &RuleConfig::default());
         assert_eq!(findings.len(), 1);
         assert_eq!(findings[0].column, 8);
         assert_eq!(findings[0].line, 1);
@@ -280,5 +373,43 @@ mod tests {
     #[test]
     fn empty_line_has_no_findings() {
         assert_eq!(rules(""), Vec::<&str>::new());
+    }
+
+    #[test]
+    fn disabled_rule_produces_no_finding() {
+        let mut config = RuleConfig::default();
+        config.disable("phone-mixed-separators");
+        let findings = scan_line(1, "555-123.4567", &config);
+        assert_eq!(findings, Vec::new());
+    }
+
+    #[test]
+    fn disabling_one_rule_leaves_the_other_active() {
+        let mut config = RuleConfig::default();
+        config.disable("phone-mixed-separators");
+        let findings = scan_line(1, "1234-567.89", &config);
+        assert_eq!(findings.len(), 1);
+        assert_eq!(findings[0].rule, "phone-digit-count");
+    }
+
+    #[test]
+    fn default_severity_is_error() {
+        let findings = scan_line(1, "555-123.4567", &RuleConfig::default());
+        assert_eq!(findings[0].severity, Severity::Error);
+    }
+
+    #[test]
+    fn severity_can_be_downgraded_to_warning() {
+        let mut config = RuleConfig::default();
+        config.set_severity("phone-mixed-separators", Severity::Warning);
+        let findings = scan_line(1, "555-123.4567", &config);
+        assert_eq!(findings[0].severity, Severity::Warning);
+    }
+
+    #[test]
+    fn severity_parses_known_values_and_rejects_others() {
+        assert_eq!(Severity::parse("warning"), Some(Severity::Warning));
+        assert_eq!(Severity::parse("error"), Some(Severity::Error));
+        assert_eq!(Severity::parse("critical"), None);
     }
 }

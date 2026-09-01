@@ -21,12 +21,14 @@ cat support_tickets.log | phonelint
 Sample output:
 
 ```
-customers.csv:14:23: [phone-mixed-separators] '555-123.4567' mixes separator styles ['-', '.'] within one number
-customers.csv:31:9: [phone-digit-count] '555-12-34' has 6 digits, which is not a common phone number length
+customers.csv:14:23: [error][phone-mixed-separators] '555-123.4567' mixes separator styles ['-', '.'] within one number
+customers.csv:31:9: [error][phone-digit-count] '555-12-34' has 6 digits, which is not a common phone number length
 ```
 
-Exit code is `0` if nothing was flagged, `1` if findings were reported, `2`
-on a read error (e.g. the file doesn't exist).
+Exit code is `0` if nothing at `error` severity was flagged, `1` if it was,
+`2` on a read error (e.g. the file doesn't exist). Findings at `warning`
+severity are still printed but don't affect the exit code, so they can be
+used for informational output in CI without failing the build.
 
 ## Rules (v1)
 
@@ -35,6 +37,16 @@ on a read error (e.g. the file doesn't exist).
 - `phone-digit-count` — the digit count doesn't match a common phone number
   length (7 for a local number, 10 or 11 for US-style, 8-15 with a leading
   `+` for international).
+
+Both rules run at `error` severity by default. Turn a rule off entirely, or
+change its severity, from the command line:
+
+```
+phonelint --disable phone-digit-count customers.csv
+phonelint --severity phone-mixed-separators=warning customers.csv
+```
+
+Both flags can be repeated and combined.
 
 ## How it decides what's a phone number
 
@@ -61,8 +73,8 @@ the same memory as scanning a ten-line one.
   filtered out (see above), but other digit runs that happen to fall in
   phone-number range - order numbers, tracking IDs, slash-separated dates -
   can still be misflagged.
-- Rules aren't configurable yet - you get exactly these two, always on.
 - One file or stdin per run; no directory scanning yet.
+- Output is plain text; no `--json` mode yet for machine consumption in CI.
 
 ## Building
 
