@@ -48,6 +48,24 @@ phonelint --severity phone-mixed-separators=warning customers.csv
 
 Both flags can be repeated and combined.
 
+## JSON output
+
+Pass `--json` to get newline-delimited JSON instead of the plain-text format,
+one object per finding, printed as it's found rather than collected into an
+array:
+
+```
+phonelint --json customers.csv
+```
+
+```
+{"file":"customers.csv","line":14,"column":23,"severity":"error","rule":"phone-mixed-separators","message":"'555-123.4567' mixes separator styles ['-', '.'] within one number"}
+{"file":"customers.csv","line":31,"column":9,"severity":"error","rule":"phone-digit-count","message":"'555-12-34' has 6 digits, which is not a common phone number length"}
+```
+
+Each line is a self-contained JSON object, so a CI job can parse results as
+they arrive instead of waiting for the whole file to finish scanning.
+
 ## How it decides what's a phone number
 
 There's no library of real number plans here, just a heuristic: scan for
@@ -74,7 +92,6 @@ the same memory as scanning a ten-line one.
   phone-number range - order numbers, tracking IDs, slash-separated dates -
   can still be misflagged.
 - One file or stdin per run; no directory scanning yet.
-- Output is plain text; no `--json` mode yet for machine consumption in CI.
 
 ## Building
 
