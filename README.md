@@ -14,6 +14,14 @@ them.
 phonelint customers.csv
 ```
 
+Pass more than one path, mix files and directories, or leave it pointed at
+a directory and phonelint will scan every file it finds underneath it:
+
+```
+phonelint customers.csv tickets.csv
+phonelint ./exports
+```
+
 ```
 cat support_tickets.log | phonelint
 ```
@@ -26,9 +34,12 @@ customers.csv:31:9: [error][phone-digit-count] '555-12-34' has 6 digits, which i
 ```
 
 Exit code is `0` if nothing at `error` severity was flagged, `1` if it was,
-`2` on a read error (e.g. the file doesn't exist). Findings at `warning`
+`2` on a read error (e.g. a file doesn't exist). Findings at `warning`
 severity are still printed but don't affect the exit code, so they can be
-used for informational output in CI without failing the build.
+used for informational output in CI without failing the build. When
+scanning several paths, a read error on one of them doesn't stop the
+others - phonelint keeps going and reports exit code `2` at the end if any
+path failed.
 
 ## Rules (v1)
 
@@ -91,7 +102,8 @@ the same memory as scanning a ten-line one.
   filtered out (see above), but other digit runs that happen to fall in
   phone-number range - order numbers, tracking IDs, slash-separated dates -
   can still be misflagged.
-- One file or stdin per run; no directory scanning yet.
+- No per-extension or area-code specific rules yet - a phone-shaped run in
+  a `.json` file is judged the same way as one in a `.csv` file.
 
 ## Building
 

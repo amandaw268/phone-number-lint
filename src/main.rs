@@ -1,6 +1,7 @@
 use std::env;
-use std::fs::File;
+use std::fs::{self, File};
 use std::io::{self, BufRead, BufReader};
+use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
 mod linter;
@@ -15,7 +16,7 @@ enum OutputFormat {
 
 fn main() -> ExitCode {
     let args: Vec<String> = env::args().skip(1).collect();
-    let (path, config, format) = match parse_args(&args) {
+    let (paths, config, format) = match parse_args(&args) {
         Ok(parsed) => parsed,
         Err(e) => {
             eprintln!("phonelint: {}", e);
@@ -23,37 +24,100 @@ fn main() -> ExitCode {
         }
     };
 
-    let result = match path.as_deref() {
-        Some(p) if p != "-" => match File::open(p) {
-            Ok(f) => run(p, BufReader::new(f), &config, format),
-            Err(e) => {
-                eprintln!("phonelint: cannot open {}: {}", p, e);
-                return ExitCode::from(2);
-            }
-        },
-        _ => run("<stdin>", BufReader::new(io::stdin()), &config, format),
-    };
+    let mut found_error = false;
+    let mut had_io_error = false;
 
-    match result {
-        Ok(found_error) => {
-            if found_error {
-                ExitCode::from(1)
-            } else {
-                ExitCode::SUCCESS
+    if paths.is_empty() {
+        scan_stdin(&config, format, &mut found_error, &mut had_io_error);
+    } else {
+        for path in &paths {
+            if path == "-" {
+                scan_stdin(&config, format, &mut found_error, &mut had_io_error);
+                continue;
+            }
+
+            let files = match expand_path(Path::new(path)) {
+                Ok(files) => files,
+                Err(e) => {
+                    eprintln!("phonelint: cannot open {}: {}", path, e);
+                    had_io_error = true;
+                    continue;
+                }
+            };
+
+            for file in files {
+                let label = file.display().to_string();
+                match File::open(&file) {
+                    Ok(f) => match run(&label, BufReader::new(f), &config, format) {
+                        Ok(err) => found_error |= err,
+                        Err(e) => {
+                            eprintln!("phonelint: read error on {}: {}", label, e);
+                            had_io_error = true;
+                        }
+                    },
+                    Err(e) => {
+                        eprintln!("phonelint: cannot open {}: {}", label, e);
+                        had_io_error = true;
+                    }
+                }
             }
         }
+    }
+
+    if had_io_error {
+        ExitCode::from(2)
+    } else if found_error {
+        ExitCode::from(1)
+    } else {
+        ExitCode::SUCCESS
+    }
+}
+
+fn scan_stdin(config: &RuleConfig, format: OutputFormat, found_error: &mut bool, had_io_error: &mut bool) {
+    match run("<stdin>", BufReader::new(io::stdin()), config, format) {
+        Ok(err) => *found_error |= err,
         Err(e) => {
             eprintln!("phonelint: read error: {}", e);
-            ExitCode::from(2)
+            *had_io_error = true;
         }
     }
 }
 
-// Parses everything but the input path into a RuleConfig. Kept separate from
-// main so the two can be tested and reasoned about without touching real
-// files or stdin.
-fn parse_args(args: &[String]) -> Result<(Option<String>, RuleConfig, OutputFormat), String> {
-    let mut path = None;
+// Expands a command-line path into the files it names: the path itself if
+// it's a file, or every file found by walking it if it's a directory. This
+// is what lets a single directory argument stand in for listing its files
+// by hand.
+fn expand_path(path: &Path) -> io::Result<Vec<PathBuf>> {
+    let metadata = fs::metadata(path)?;
+    if !metadata.is_dir() {
+        return Ok(vec![path.to_path_buf()]);
+    }
+
+    let mut files = Vec::new();
+    collect_dir(path, &mut files)?;
+    files.sort();
+    Ok(files)
+}
+
+fn collect_dir(dir: &Path, files: &mut Vec<PathBuf>) -> io::Result<()> {
+    for entry in fs::read_dir(dir)? {
+        let entry = entry?;
+        let file_type = entry.file_type()?;
+        let path = entry.path();
+        if file_type.is_dir() {
+            collect_dir(&path, files)?;
+        } else if file_type.is_file() {
+            files.push(path);
+        }
+    }
+    Ok(())
+}
+
+// Parses everything but the input paths into a RuleConfig. Kept separate
+// from main so the two can be tested and reasoned about without touching
+// real files or stdin.
+fn parse_args(args: &[String]) -> Result<(Vec<String>, RuleConfig, OutputFormat), String> {
+    let mut paths = Vec::new();
     let mut config = RuleConfig::default();
     let mut format = OutputFormat::Text;
     let mut iter = args.iter();
@@ -84,15 +148,12 @@ fn parse_args(args: &[String]) -> Result<(Option<String>, RuleConfig, OutputForm
                 return Err(format!("unknown option '{}'", other));
             }
             other => {
-                if path.is_some() {
-                    return Err("only one input path is supported".to_string());
-                }
-                path = Some(other.to_string());
+                paths.push(other.to_string());
             }
         }
     }
 
-    Ok((path, config, format))
+    Ok((paths, config, format))
 }
 
 fn known_rule(name: &str) -> Result<&'static str, String> {
@@ -177,22 +238,29 @@ mod tests {
 
     #[test]
     fn no_args_means_stdin_and_default_config() {
-        let (path, _config, format) = parse_args(&[]).unwrap();
-        assert_eq!(path, None);
+        let (paths, _config, format) = parse_args(&[]).unwrap();
+        assert!(paths.is_empty());
         assert_eq!(format, OutputFormat::Text);
     }
 
     #[test]
     fn positional_arg_is_the_path() {
-        let (path, _config, _format) = parse_args(&["file.csv".to_string()]).unwrap();
-        assert_eq!(path.as_deref(), Some("file.csv"));
+        let (paths, _config, _format) = parse_args(&["file.csv".to_string()]).unwrap();
+        assert_eq!(paths, vec!["file.csv".to_string()]);
+    }
+
+    #[test]
+    fn multiple_positional_args_are_all_kept() {
+        let (paths, _config, _format) =
+            parse_args(&["a.csv".to_string(), "b.csv".to_string()]).unwrap();
+        assert_eq!(paths, vec!["a.csv".to_string(), "b.csv".to_string()]);
     }
 
     #[test]
     fn json_flag_switches_output_format() {
-        let (path, _config, format) =
+        let (paths, _config, format) =
             parse_args(&["--json".to_string(), "file.csv".to_string()]).unwrap();
-        assert_eq!(path.as_deref(), Some("file.csv"));
+        assert_eq!(paths, vec!["file.csv".to_string()]);
         assert_eq!(format, OutputFormat::Json);
     }
 
@@ -219,14 +287,8 @@ mod tests {
     }
 
     #[test]
-    fn two_positional_paths_is_an_error() {
-        let err = parse_args(&["a.csv".to_string(), "b.csv".to_string()]).unwrap_err();
-        assert!(err.contains("only one input path"));
-    }
-
-    #[test]
     fn valid_disable_and_severity_flags_combine_with_a_path() {
-        let (path, _config, _format) = parse_args(&[
+        let (paths, _config, _format) = parse_args(&[
             "--disable".to_string(),
             "phone-mixed-separators".to_string(),
             "--severity".to_string(),
@@ -234,7 +296,7 @@ mod tests {
             "file.csv".to_string(),
         ])
         .unwrap();
-        assert_eq!(path.as_deref(), Some("file.csv"));
+        assert_eq!(paths, vec!["file.csv".to_string()]);
     }
 
     #[test]
@@ -251,5 +313,46 @@ mod tests {
     #[test]
     fn json_escape_leaves_plain_text_unchanged() {
         assert_eq!(json_escape("555-123-4567"), "555-123-4567");
+    }
+
+    // Tests below touch the filesystem, under a name unique to the test so
+    // parallel test threads never share a directory.
+    fn unique_temp_dir(name: &str) -> PathBuf {
+        std::env::temp_dir().join(format!("phonelint_test_{}_{}", name, std::process::id()))
+    }
+
+    #[test]
+    fn expand_path_returns_a_single_file_unchanged() {
+        let dir = unique_temp_dir("single_file");
+        fs::create_dir_all(&dir).unwrap();
+        let file = dir.join("a.txt");
+        fs::write(&file, "555-123-4567").unwrap();
+
+        assert_eq!(expand_path(&file).unwrap(), vec![file.clone()]);
+
+        fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn expand_path_walks_a_directory_recursively() {
+        let dir = unique_temp_dir("directory_walk");
+        fs::create_dir_all(dir.join("nested")).unwrap();
+        fs::write(dir.join("a.txt"), "one").unwrap();
+        fs::write(dir.join("nested").join("b.txt"), "two").unwrap();
+
+        let mut result = expand_path(&dir).unwrap();
+        result.sort();
+        assert_eq!(
+            result,
+            vec![dir.join("a.txt"), dir.join("nested").join("b.txt")]
+        );
+
+        fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn expand_path_on_missing_path_is_an_error() {
+        let dir = unique_temp_dir("missing_path");
+        assert!(expand_path(&dir).is_err());
     }
 }
