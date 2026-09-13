@@ -15,7 +15,11 @@ const MAX_PHONE_DIGITS: usize = 15;
 // The names rules are known by, for --disable and --severity. Kept in one
 // place so an unknown rule name given on the command line can be rejected
 // instead of silently doing nothing.
-pub const RULE_NAMES: [&str; 2] = ["phone-mixed-separators", "phone-digit-count"];
+pub const RULE_NAMES: [&str; 3] = [
+    "phone-mixed-separators",
+    "phone-digit-count",
+    "phone-invalid-area-code",
+];
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Severity {
@@ -148,6 +152,7 @@ fn evaluate_run(
 
     check_digit_count(line_number, column, trimmed, digit_count, config, findings);
     check_separator_consistency(line_number, column, trimmed, config, findings);
+    check_area_code(line_number, column, trimmed, digit_count, config, findings);
 }
 
 // A plain decimal number - one dot, digits on both sides, nothing else in
@@ -266,6 +271,51 @@ fn check_separator_consistency(
             message: format!(
                 "'{}' mixes separator styles {:?} within one number",
                 trimmed, seps_seen
+            ),
+        });
+    }
+}
+
+// The North American Numbering Plan requires an area code of the form NXX,
+// where N is 2-9 and X is 0-9, and reserves every N11 code (211, 311, ...,
+// 911) for services rather than geographic numbers. This only applies to
+// numbers shaped like a NANP number - a bare national one (10 digits) or one
+// with the leading '1' country code (11 digits) - so anything with a '+'
+// prefix or a different digit count is left alone.
+fn check_area_code(
+    line_number: usize,
+    column: usize,
+    trimmed: &str,
+    digit_count: usize,
+    config: &RuleConfig,
+    findings: &mut Vec<Finding>,
+) {
+    const RULE: &str = "phone-invalid-area-code";
+    if !config.is_enabled(RULE) || trimmed.starts_with('+') {
+        return;
+    }
+
+    let digits: Vec<char> = trimmed.chars().filter(|c| c.is_ascii_digit()).collect();
+    let area_code: &[char] = match digit_count {
+        10 => &digits[0..3],
+        11 if digits[0] == '1' => &digits[1..4],
+        _ => return,
+    };
+
+    let is_valid = area_code[0] != '0'
+        && area_code[0] != '1'
+        && !(area_code[1] == '1' && area_code[2] == '1');
+
+    if !is_valid {
+        let code: String = area_code.iter().collect();
+        findings.push(Finding {
+            line: line_number,
+            column,
+            rule: RULE,
+            severity: config.severity_of(RULE),
+            message: format!(
+                "'{}' has area code {}, which is not a valid NANP area code",
+                trimmed, code
             ),
         });
     }
@@ -411,5 +461,48 @@ mod tests {
         assert_eq!(Severity::parse("warning"), Some(Severity::Warning));
         assert_eq!(Severity::parse("error"), Some(Severity::Error));
         assert_eq!(Severity::parse("critical"), None);
+    }
+
+    #[test]
+    fn area_code_starting_with_zero_is_flagged() {
+        assert_eq!(rules("023-456-7890"), vec!["phone-invalid-area-code"]);
+    }
+
+    #[test]
+    fn area_code_starting_with_one_is_flagged() {
+        assert_eq!(rules("123-456-7890"), vec!["phone-invalid-area-code"]);
+    }
+
+    #[test]
+    fn reserved_n11_area_code_is_flagged() {
+        assert_eq!(rules("911-555-1234"), vec!["phone-invalid-area-code"]);
+    }
+
+    #[test]
+    fn valid_area_code_is_not_flagged() {
+        assert_eq!(rules("415-555-1234"), Vec::<&str>::new());
+    }
+
+    #[test]
+    fn eleven_digit_number_checks_area_code_after_leading_one() {
+        assert_eq!(rules("1-911-555-1234"), vec!["phone-invalid-area-code"]);
+    }
+
+    #[test]
+    fn eleven_digit_number_without_leading_one_skips_area_code_check() {
+        assert_eq!(rules("2-555-123-4567"), Vec::<&str>::new());
+    }
+
+    #[test]
+    fn plus_prefixed_number_skips_area_code_check() {
+        assert_eq!(rules("+1 911 555 1234"), Vec::<&str>::new());
+    }
+
+    #[test]
+    fn area_code_rule_can_be_disabled() {
+        let mut config = RuleConfig::default();
+        config.disable("phone-invalid-area-code");
+        let findings = scan_line(1, "911-555-1234", &config);
+        assert_eq!(findings, Vec::new());
     }
 }

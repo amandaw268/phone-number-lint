@@ -48,8 +48,13 @@ path failed.
 - `phone-digit-count` — the digit count doesn't match a common phone number
   length (7 for a local number, 10 or 11 for US-style, 8-15 with a leading
   `+` for international).
+- `phone-invalid-area-code` — a 10-digit or leading-`1` 11-digit number's
+  area code doesn't fit the North American Numbering Plan: it starts with
+  `0` or `1`, or it's a reserved `N11` service code (`211`, `411`, `911`,
+  and so on). Numbers with a `+` country-code prefix are outside the NANP
+  and skip this rule.
 
-Both rules run at `error` severity by default. Turn a rule off entirely, or
+All rules run at `error` severity by default. Turn a rule off entirely, or
 change its severity, from the command line:
 
 ```
@@ -102,8 +107,11 @@ the same memory as scanning a ten-line one.
   filtered out (see above), but other digit runs that happen to fall in
   phone-number range - order numbers, tracking IDs, slash-separated dates -
   can still be misflagged.
-- No per-extension or area-code specific rules yet - a phone-shaped run in
-  a `.json` file is judged the same way as one in a `.csv` file.
+- No per-extension rules yet - a phone-shaped run in a `.json` file is
+  judged the same way as one in a `.csv` file.
+- Area-code validation only covers the North American Numbering Plan;
+  numbers with a `+` country-code prefix aren't checked against any
+  real numbering plan at all.
 
 ## Building
 
