@@ -53,6 +53,11 @@ path failed.
   `0` or `1`, or it's a reserved `N11` service code (`211`, `411`, `911`,
   and so on). Numbers with a `+` country-code prefix are outside the NANP
   and skip this rule.
+- `phone-invalid-exchange-code` — the same number's exchange code (the
+  central office code, the second group of three digits) fails the same
+  NANP shape check as the area code: it can't start with `0` or `1`, and
+  it can't be a reserved `N11` code either. Same scope as the area-code
+  rule - `+`-prefixed numbers skip it.
 
 All rules run at `error` severity by default. Turn a rule off entirely, or
 change its severity, from the command line:
@@ -109,9 +114,9 @@ the same memory as scanning a ten-line one.
   can still be misflagged.
 - No per-extension rules yet - a phone-shaped run in a `.json` file is
   judged the same way as one in a `.csv` file.
-- Area-code validation only covers the North American Numbering Plan;
-  numbers with a `+` country-code prefix aren't checked against any
-  real numbering plan at all.
+- Area-code and exchange-code validation only cover the North American
+  Numbering Plan; numbers with a `+` country-code prefix aren't checked
+  against any real numbering plan at all.
 
 ## Building
 

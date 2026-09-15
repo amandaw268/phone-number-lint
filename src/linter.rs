@@ -15,10 +15,11 @@ const MAX_PHONE_DIGITS: usize = 15;
 // The names rules are known by, for --disable and --severity. Kept in one
 // place so an unknown rule name given on the command line can be rejected
 // instead of silently doing nothing.
-pub const RULE_NAMES: [&str; 3] = [
+pub const RULE_NAMES: [&str; 4] = [
     "phone-mixed-separators",
     "phone-digit-count",
     "phone-invalid-area-code",
+    "phone-invalid-exchange-code",
 ];
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -153,6 +154,7 @@ fn evaluate_run(
     check_digit_count(line_number, column, trimmed, digit_count, config, findings);
     check_separator_consistency(line_number, column, trimmed, config, findings);
     check_area_code(line_number, column, trimmed, digit_count, config, findings);
+    check_exchange_code(line_number, column, trimmed, digit_count, config, findings);
 }
 
 // A plain decimal number - one dot, digits on both sides, nothing else in
@@ -276,12 +278,29 @@ fn check_separator_consistency(
     }
 }
 
-// The North American Numbering Plan requires an area code of the form NXX,
-// where N is 2-9 and X is 0-9, and reserves every N11 code (211, 311, ...,
-// 911) for services rather than geographic numbers. This only applies to
-// numbers shaped like a NANP number - a bare national one (10 digits) or one
-// with the leading '1' country code (11 digits) - so anything with a '+'
-// prefix or a different digit count is left alone.
+// Both the area code and the exchange code (central office code) that follow
+// it share the same NXX shape under the NANP: N is 2-9, X is 0-9, and every
+// N11 combination (211, 311, ..., 911) is reserved for services rather than
+// assigned to a geographic number or an exchange.
+fn is_valid_nxx(code: &[char]) -> bool {
+    code[0] != '0' && code[0] != '1' && !(code[1] == '1' && code[2] == '1')
+}
+
+// This only applies to numbers shaped like a NANP number - a bare national
+// one (10 digits) or one with the leading '1' country code (11 digits) - so
+// anything with a '+' prefix or a different digit count is left alone.
+fn nanp_digits(trimmed: &str, digit_count: usize) -> Option<Vec<char>> {
+    if trimmed.starts_with('+') {
+        return None;
+    }
+    let digits: Vec<char> = trimmed.chars().filter(|c| c.is_ascii_digit()).collect();
+    match digit_count {
+        10 => Some(digits),
+        11 if digits[0] == '1' => Some(digits[1..].to_vec()),
+        _ => None,
+    }
+}
+
 fn check_area_code(
     line_number: usize,
     column: usize,
@@ -291,22 +310,16 @@ fn check_area_code(
     findings: &mut Vec<Finding>,
 ) {
     const RULE: &str = "phone-invalid-area-code";
-    if !config.is_enabled(RULE) || trimmed.starts_with('+') {
+    if !config.is_enabled(RULE) {
         return;
     }
 
-    let digits: Vec<char> = trimmed.chars().filter(|c| c.is_ascii_digit()).collect();
-    let area_code: &[char] = match digit_count {
-        10 => &digits[0..3],
-        11 if digits[0] == '1' => &digits[1..4],
-        _ => return,
+    let Some(digits) = nanp_digits(trimmed, digit_count) else {
+        return;
     };
+    let area_code = &digits[0..3];
 
-    let is_valid = area_code[0] != '0'
-        && area_code[0] != '1'
-        && !(area_code[1] == '1' && area_code[2] == '1');
-
-    if !is_valid {
+    if !is_valid_nxx(area_code) {
         let code: String = area_code.iter().collect();
         findings.push(Finding {
             line: line_number,
@@ -315,6 +328,43 @@ fn check_area_code(
             severity: config.severity_of(RULE),
             message: format!(
                 "'{}' has area code {}, which is not a valid NANP area code",
+                trimmed, code
+            ),
+        });
+    }
+}
+
+// The exchange code is the second group of three digits (the NXX in
+// NXX-NXX-XXXX). It follows the same NXX shape as the area code, so a run
+// like 555-234-4567 is fine but 555-011-4567 is not: an exchange code can't
+// start with 0 or 1 either.
+fn check_exchange_code(
+    line_number: usize,
+    column: usize,
+    trimmed: &str,
+    digit_count: usize,
+    config: &RuleConfig,
+    findings: &mut Vec<Finding>,
+) {
+    const RULE: &str = "phone-invalid-exchange-code";
+    if !config.is_enabled(RULE) {
+        return;
+    }
+
+    let Some(digits) = nanp_digits(trimmed, digit_count) else {
+        return;
+    };
+    let exchange_code = &digits[3..6];
+
+    if !is_valid_nxx(exchange_code) {
+        let code: String = exchange_code.iter().collect();
+        findings.push(Finding {
+            line: line_number,
+            column,
+            rule: RULE,
+            severity: config.severity_of(RULE),
+            message: format!(
+                "'{}' has exchange code {}, which is not a valid NANP central office code",
                 trimmed, code
             ),
         });
@@ -334,12 +384,12 @@ mod tests {
 
     #[test]
     fn clean_us_number_with_dashes_is_not_flagged() {
-        assert_eq!(rules("call 555-123-4567 now"), Vec::<&str>::new());
+        assert_eq!(rules("call 555-234-4567 now"), Vec::<&str>::new());
     }
 
     #[test]
     fn clean_ten_digit_number_no_separators_is_not_flagged() {
-        assert_eq!(rules("5551234567"), Vec::<&str>::new());
+        assert_eq!(rules("5552344567"), Vec::<&str>::new());
     }
 
     #[test]
@@ -349,12 +399,12 @@ mod tests {
 
     #[test]
     fn mixed_dash_and_dot_is_flagged() {
-        assert_eq!(rules("555-123.4567"), vec!["phone-mixed-separators"]);
+        assert_eq!(rules("555-234.4567"), vec!["phone-mixed-separators"]);
     }
 
     #[test]
     fn mixed_space_and_dash_is_flagged() {
-        assert_eq!(rules("(555) 123-4567"), vec!["phone-mixed-separators"]);
+        assert_eq!(rules("(555) 234-4567"), vec!["phone-mixed-separators"]);
     }
 
     #[test]
@@ -388,7 +438,7 @@ mod tests {
     #[test]
     fn multiple_candidates_on_one_line_are_each_evaluated() {
         assert_eq!(
-            rules("555-123-4567 and 1234-567-89 and 555.123.4567"),
+            rules("555-234-4567 and 1234-567-89 and 555.234.4567"),
             vec!["phone-digit-count"]
         );
     }
@@ -429,7 +479,7 @@ mod tests {
     fn disabled_rule_produces_no_finding() {
         let mut config = RuleConfig::default();
         config.disable("phone-mixed-separators");
-        let findings = scan_line(1, "555-123.4567", &config);
+        let findings = scan_line(1, "555-234.4567", &config);
         assert_eq!(findings, Vec::new());
     }
 
@@ -444,7 +494,7 @@ mod tests {
 
     #[test]
     fn default_severity_is_error() {
-        let findings = scan_line(1, "555-123.4567", &RuleConfig::default());
+        let findings = scan_line(1, "555-234.4567", &RuleConfig::default());
         assert_eq!(findings[0].severity, Severity::Error);
     }
 
@@ -452,7 +502,7 @@ mod tests {
     fn severity_can_be_downgraded_to_warning() {
         let mut config = RuleConfig::default();
         config.set_severity("phone-mixed-separators", Severity::Warning);
-        let findings = scan_line(1, "555-123.4567", &config);
+        let findings = scan_line(1, "555-234.4567", &config);
         assert_eq!(findings[0].severity, Severity::Warning);
     }
 
@@ -504,5 +554,54 @@ mod tests {
         config.disable("phone-invalid-area-code");
         let findings = scan_line(1, "911-555-1234", &config);
         assert_eq!(findings, Vec::new());
+    }
+
+    #[test]
+    fn exchange_code_starting_with_zero_is_flagged() {
+        assert_eq!(rules("555-023-4567"), vec!["phone-invalid-exchange-code"]);
+    }
+
+    #[test]
+    fn exchange_code_starting_with_one_is_flagged() {
+        assert_eq!(rules("555-123-4567"), vec!["phone-invalid-exchange-code"]);
+    }
+
+    #[test]
+    fn reserved_n11_exchange_code_is_flagged() {
+        assert_eq!(rules("555-911-1234"), vec!["phone-invalid-exchange-code"]);
+    }
+
+    #[test]
+    fn valid_exchange_code_is_not_flagged() {
+        assert_eq!(rules("415-234-1234"), Vec::<&str>::new());
+    }
+
+    #[test]
+    fn eleven_digit_number_checks_exchange_code_after_leading_one() {
+        assert_eq!(
+            rules("1-415-911-1234"),
+            vec!["phone-invalid-exchange-code"]
+        );
+    }
+
+    #[test]
+    fn plus_prefixed_number_skips_exchange_code_check() {
+        assert_eq!(rules("+1 415 911 1234"), Vec::<&str>::new());
+    }
+
+    #[test]
+    fn exchange_code_rule_can_be_disabled() {
+        let mut config = RuleConfig::default();
+        config.disable("phone-invalid-exchange-code");
+        let findings = scan_line(1, "555-911-1234", &config);
+        assert_eq!(findings, Vec::new());
+    }
+
+    #[test]
+    fn both_area_and_exchange_code_violations_are_reported() {
+        assert_eq!(
+            rules("911-911-1234"),
+            vec!["phone-invalid-area-code", "phone-invalid-exchange-code"]
+        );
     }
 }
