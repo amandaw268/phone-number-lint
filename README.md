@@ -99,6 +99,13 @@ dot, digits on both sides) and a dash-grouped date (`2024-01-01` or
 that falls in the digit-count range gets treated as a candidate - long IDs
 can still occasionally get flagged, see Limitations below.
 
+The one exception is `.json` files: a bare run of digits with no separators
+at all (no `-`, `.`, space, or `+`) is never flagged there, since JSON has no
+convention that would make someone type a phone number without punctuation -
+a bare 10-15 digit number in JSON is far more likely a snowflake id or a
+millisecond timestamp. A run that still carries a separator, like
+`"555-123-4567"`, is judged the same as anywhere else.
+
 ## Why streaming matters here
 
 Log files and CSV exports are the natural input, and those can be large.
@@ -112,8 +119,9 @@ the same memory as scanning a ten-line one.
   filtered out (see above), but other digit runs that happen to fall in
   phone-number range - order numbers, tracking IDs, slash-separated dates -
   can still be misflagged.
-- No per-extension rules yet - a phone-shaped run in a `.json` file is
-  judged the same way as one in a `.csv` file.
+- Extension-specific handling is limited to one case so far: bare digit
+  runs in `.json` files (see above). Every other extension, including
+  `.csv`, is judged the same way.
 - Area-code and exchange-code validation only cover the North American
   Numbering Plan; numbers with a `+` country-code prefix aren't checked
   against any real numbering plan at all.

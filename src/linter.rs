@@ -22,6 +22,24 @@ pub const RULE_NAMES: [&str; 4] = [
     "phone-invalid-exchange-code",
 ];
 
+// Which kind of file a run came from, so a handful of rules can take the
+// file's own conventions into account instead of judging every extension
+// the same way.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FileKind {
+    Json,
+    Other,
+}
+
+impl FileKind {
+    pub fn from_extension(ext: Option<&str>) -> FileKind {
+        match ext {
+            Some(ext) if ext.eq_ignore_ascii_case("json") => FileKind::Json,
+            _ => FileKind::Other,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Severity {
     Warning,
@@ -103,7 +121,7 @@ fn is_prose_punct(c: char) -> bool {
     c == ' ' || c == '.' || c == '-'
 }
 
-pub fn scan_line(line_number: usize, text: &str, config: &RuleConfig) -> Vec<Finding> {
+pub fn scan_line(line_number: usize, text: &str, config: &RuleConfig, kind: FileKind) -> Vec<Finding> {
     let mut findings = Vec::new();
     let mut run_start: Option<usize> = None;
 
@@ -113,14 +131,24 @@ pub fn scan_line(line_number: usize, text: &str, config: &RuleConfig) -> Vec<Fin
                 run_start = Some(idx);
             }
         } else if let Some(start) = run_start.take() {
-            evaluate_run(line_number, text, start, idx, config, &mut findings);
+            evaluate_run(line_number, text, start, idx, config, kind, &mut findings);
         }
     }
     if let Some(start) = run_start {
-        evaluate_run(line_number, text, start, text.len(), config, &mut findings);
+        evaluate_run(line_number, text, start, text.len(), config, kind, &mut findings);
     }
 
     findings
+}
+
+// A run with no separator characters at all - just digits. In JSON, unlike a
+// CSV column or a line of prose, a bare digit sequence this long is far more
+// likely a snowflake id or a millisecond timestamp than a typed-out phone
+// number, since JSON has no formatting convention that would make someone
+// write a phone number without punctuation. Runs that still carry a '+' or
+// separator are left alone even in JSON, since those are actually phone-shaped.
+fn is_bare_digit_run(trimmed: &str) -> bool {
+    trimmed.chars().all(|c| c.is_ascii_digit())
 }
 
 fn evaluate_run(
@@ -129,6 +157,7 @@ fn evaluate_run(
     start: usize,
     end: usize,
     config: &RuleConfig,
+    kind: FileKind,
     findings: &mut Vec<Finding>,
 ) {
     let raw = &text[start..end];
@@ -148,6 +177,10 @@ fn evaluate_run(
     }
 
     if looks_like_date(trimmed) || looks_like_decimal_number(trimmed) {
+        return;
+    }
+
+    if kind == FileKind::Json && is_bare_digit_run(trimmed) {
         return;
     }
 
@@ -376,7 +409,14 @@ mod tests {
     use super::*;
 
     fn rules(line: &str) -> Vec<&'static str> {
-        scan_line(1, line, &RuleConfig::default())
+        scan_line(1, line, &RuleConfig::default(), FileKind::Other)
+            .iter()
+            .map(|f| f.rule)
+            .collect()
+    }
+
+    fn rules_in(line: &str, kind: FileKind) -> Vec<&'static str> {
+        scan_line(1, line, &RuleConfig::default(), kind)
             .iter()
             .map(|f| f.rule)
             .collect()
@@ -429,7 +469,7 @@ mod tests {
 
     #[test]
     fn column_accounts_for_leading_prose_and_is_one_based() {
-        let findings = scan_line(1, "phone: 1234-567-89.", &RuleConfig::default());
+        let findings = scan_line(1, "phone: 1234-567-89.", &RuleConfig::default(), FileKind::Other);
         assert_eq!(findings.len(), 1);
         assert_eq!(findings[0].column, 8);
         assert_eq!(findings[0].line, 1);
@@ -479,7 +519,7 @@ mod tests {
     fn disabled_rule_produces_no_finding() {
         let mut config = RuleConfig::default();
         config.disable("phone-mixed-separators");
-        let findings = scan_line(1, "555-234.4567", &config);
+        let findings = scan_line(1, "555-234.4567", &config, FileKind::Other);
         assert_eq!(findings, Vec::new());
     }
 
@@ -487,14 +527,14 @@ mod tests {
     fn disabling_one_rule_leaves_the_other_active() {
         let mut config = RuleConfig::default();
         config.disable("phone-mixed-separators");
-        let findings = scan_line(1, "1234-567.89", &config);
+        let findings = scan_line(1, "1234-567.89", &config, FileKind::Other);
         assert_eq!(findings.len(), 1);
         assert_eq!(findings[0].rule, "phone-digit-count");
     }
 
     #[test]
     fn default_severity_is_error() {
-        let findings = scan_line(1, "555-234.4567", &RuleConfig::default());
+        let findings = scan_line(1, "555-234.4567", &RuleConfig::default(), FileKind::Other);
         assert_eq!(findings[0].severity, Severity::Error);
     }
 
@@ -502,7 +542,7 @@ mod tests {
     fn severity_can_be_downgraded_to_warning() {
         let mut config = RuleConfig::default();
         config.set_severity("phone-mixed-separators", Severity::Warning);
-        let findings = scan_line(1, "555-234.4567", &config);
+        let findings = scan_line(1, "555-234.4567", &config, FileKind::Other);
         assert_eq!(findings[0].severity, Severity::Warning);
     }
 
@@ -552,7 +592,7 @@ mod tests {
     fn area_code_rule_can_be_disabled() {
         let mut config = RuleConfig::default();
         config.disable("phone-invalid-area-code");
-        let findings = scan_line(1, "911-555-1234", &config);
+        let findings = scan_line(1, "911-555-1234", &config, FileKind::Other);
         assert_eq!(findings, Vec::new());
     }
 
@@ -593,7 +633,7 @@ mod tests {
     fn exchange_code_rule_can_be_disabled() {
         let mut config = RuleConfig::default();
         config.disable("phone-invalid-exchange-code");
-        let findings = scan_line(1, "555-911-1234", &config);
+        let findings = scan_line(1, "555-911-1234", &config, FileKind::Other);
         assert_eq!(findings, Vec::new());
     }
 
@@ -603,5 +643,41 @@ mod tests {
             rules("911-911-1234"),
             vec!["phone-invalid-area-code", "phone-invalid-exchange-code"]
         );
+    }
+
+    #[test]
+    fn bare_digit_run_in_json_is_not_flagged() {
+        // 13 digits with no separators reads like a millisecond timestamp
+        // or a snowflake id in JSON, not a phone number.
+        assert_eq!(rules_in("1699999999999", FileKind::Json), Vec::<&str>::new());
+    }
+
+    #[test]
+    fn same_bare_digit_run_outside_json_is_flagged() {
+        assert_eq!(
+            rules_in("1699999999999", FileKind::Other),
+            vec!["phone-digit-count"]
+        );
+    }
+
+    #[test]
+    fn separator_punctuated_number_in_json_is_still_flagged() {
+        assert_eq!(
+            rules_in("555-234.4567", FileKind::Json),
+            vec!["phone-mixed-separators"]
+        );
+    }
+
+    #[test]
+    fn clean_ten_digit_number_in_json_is_not_flagged() {
+        assert_eq!(rules_in("5552344567", FileKind::Json), Vec::<&str>::new());
+    }
+
+    #[test]
+    fn file_kind_from_extension_matches_json_case_insensitively() {
+        assert_eq!(FileKind::from_extension(Some("json")), FileKind::Json);
+        assert_eq!(FileKind::from_extension(Some("JSON")), FileKind::Json);
+        assert_eq!(FileKind::from_extension(Some("csv")), FileKind::Other);
+        assert_eq!(FileKind::from_extension(None), FileKind::Other);
     }
 }

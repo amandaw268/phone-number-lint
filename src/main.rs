@@ -6,7 +6,7 @@ use std::process::ExitCode;
 
 mod linter;
 
-use linter::{RuleConfig, Severity};
+use linter::{FileKind, RuleConfig, Severity};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum OutputFormat {
@@ -47,8 +47,9 @@ fn main() -> ExitCode {
 
             for file in files {
                 let label = file.display().to_string();
+                let kind = FileKind::from_extension(file.extension().and_then(|e| e.to_str()));
                 match File::open(&file) {
-                    Ok(f) => match run(&label, BufReader::new(f), &config, format) {
+                    Ok(f) => match run(&label, BufReader::new(f), &config, format, kind) {
                         Ok(err) => found_error |= err,
                         Err(e) => {
                             eprintln!("phonelint: read error on {}: {}", label, e);
@@ -74,7 +75,7 @@ fn main() -> ExitCode {
 }
 
 fn scan_stdin(config: &RuleConfig, format: OutputFormat, found_error: &mut bool, had_io_error: &mut bool) {
-    match run("<stdin>", BufReader::new(io::stdin()), config, format) {
+    match run("<stdin>", BufReader::new(io::stdin()), config, format, FileKind::Other) {
         Ok(err) => *found_error |= err,
         Err(e) => {
             eprintln!("phonelint: read error: {}", e);
@@ -173,6 +174,7 @@ fn run<R: BufRead>(
     mut reader: R,
     config: &RuleConfig,
     format: OutputFormat,
+    kind: FileKind,
 ) -> io::Result<bool> {
     let mut line = String::new();
     let mut line_number = 0usize;
@@ -187,7 +189,7 @@ fn run<R: BufRead>(
         line_number += 1;
         let text = line.trim_end_matches(['\n', '\r']);
 
-        for finding in linter::scan_line(line_number, text, config) {
+        for finding in linter::scan_line(line_number, text, config, kind) {
             if finding.severity == Severity::Error {
                 found_error = true;
             }
