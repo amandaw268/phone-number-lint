@@ -28,6 +28,8 @@ pub const RULE_NAMES: [&str; 4] = [
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum FileKind {
     Json,
+    Yaml,
+    Log,
     Other,
 }
 
@@ -35,8 +37,21 @@ impl FileKind {
     pub fn from_extension(ext: Option<&str>) -> FileKind {
         match ext {
             Some(ext) if ext.eq_ignore_ascii_case("json") => FileKind::Json,
+            Some(ext) if ext.eq_ignore_ascii_case("yaml") || ext.eq_ignore_ascii_case("yml") => {
+                FileKind::Yaml
+            }
+            Some(ext) if ext.eq_ignore_ascii_case("log") => FileKind::Log,
             _ => FileKind::Other,
         }
+    }
+
+    // JSON, YAML and log lines all carry bare digit runs as a matter of
+    // course - object ids, epoch timestamps, request durations - and none of
+    // those formats has a convention that would make someone type a phone
+    // number without punctuation. A CSV column or a line of prose doesn't
+    // have that excuse, so they keep judging bare digit runs normally.
+    fn suppresses_bare_digit_run(self) -> bool {
+        matches!(self, FileKind::Json | FileKind::Yaml | FileKind::Log)
     }
 }
 
@@ -141,12 +156,9 @@ pub fn scan_line(line_number: usize, text: &str, config: &RuleConfig, kind: File
     findings
 }
 
-// A run with no separator characters at all - just digits. In JSON, unlike a
-// CSV column or a line of prose, a bare digit sequence this long is far more
-// likely a snowflake id or a millisecond timestamp than a typed-out phone
-// number, since JSON has no formatting convention that would make someone
-// write a phone number without punctuation. Runs that still carry a '+' or
-// separator are left alone even in JSON, since those are actually phone-shaped.
+// A run with no separator characters at all - just digits. Runs that still
+// carry a '+' or separator are left alone regardless of file kind, since
+// those are actually phone-shaped; this only applies to the fully bare case.
 fn is_bare_digit_run(trimmed: &str) -> bool {
     trimmed.chars().all(|c| c.is_ascii_digit())
 }
@@ -180,7 +192,7 @@ fn evaluate_run(
         return;
     }
 
-    if kind == FileKind::Json && is_bare_digit_run(trimmed) {
+    if kind.suppresses_bare_digit_run() && is_bare_digit_run(trimmed) {
         return;
     }
 
@@ -679,5 +691,35 @@ mod tests {
         assert_eq!(FileKind::from_extension(Some("JSON")), FileKind::Json);
         assert_eq!(FileKind::from_extension(Some("csv")), FileKind::Other);
         assert_eq!(FileKind::from_extension(None), FileKind::Other);
+    }
+
+    #[test]
+    fn file_kind_from_extension_matches_yaml_and_yml() {
+        assert_eq!(FileKind::from_extension(Some("yaml")), FileKind::Yaml);
+        assert_eq!(FileKind::from_extension(Some("YML")), FileKind::Yaml);
+    }
+
+    #[test]
+    fn file_kind_from_extension_matches_log() {
+        assert_eq!(FileKind::from_extension(Some("log")), FileKind::Log);
+        assert_eq!(FileKind::from_extension(Some("LOG")), FileKind::Log);
+    }
+
+    #[test]
+    fn bare_digit_run_in_yaml_is_not_flagged() {
+        assert_eq!(rules_in("1699999999999", FileKind::Yaml), Vec::<&str>::new());
+    }
+
+    #[test]
+    fn bare_digit_run_in_log_is_not_flagged() {
+        assert_eq!(rules_in("1699999999999", FileKind::Log), Vec::<&str>::new());
+    }
+
+    #[test]
+    fn separator_punctuated_number_in_log_is_still_flagged() {
+        assert_eq!(
+            rules_in("555-234.4567", FileKind::Log),
+            vec!["phone-mixed-separators"]
+        );
     }
 }
